@@ -27,6 +27,23 @@ def build_tree_structure(files):
         parts = file_path.split(os.sep)
 
         current = tree
+        for i, part in enumerate(parts):
+            if part not in current:
+                # 🔥 FIX: file = None
+                if i == len(parts) - 1:
+                    current[part] = None
+                else:
+                    current[part] = {}
+
+            current = current[part] if current[part] is not None else {}
+
+    return tree
+    tree = {}
+
+    for file_path in files:
+        parts = file_path.split(os.sep)
+
+        current = tree
         for part in parts:
             if part not in current:
                 current[part] = {}
@@ -196,6 +213,26 @@ def get_file_content(repo_path, file_path):
 
     try:
         with open(full_path, "r", errors="ignore") as f:
-            return f.read()[:2000]  # limit size
+            return f.read()[:5000]  # limit size
     except:
         return ""
+
+import re
+
+def extract_imports(code):
+    imports = []
+
+    # match: from services.utils import ...
+    pattern1 = r'from\s+([\w\.]+)\s+import'
+
+    # match: import services.utils
+    pattern2 = r'import\s+([\w\.]+)'
+
+    matches = re.findall(pattern1, code) + re.findall(pattern2, code)
+
+    for match in matches:
+        # convert dot path → file path
+        file_path = match.replace(".", "/") + ".py"
+        imports.append(file_path)
+
+    return imports

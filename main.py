@@ -1,6 +1,9 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import json
+
+from core.state import save_state, load_state
+
 from services.chat import chat_with_repo
 from services.clone_repo import clone_repo
 from services.file_tree import (
@@ -18,86 +21,119 @@ class RepoRequest(BaseModel):
     repo_url: str
 
 
+class ChatRequest(BaseModel):
+    question: str
+
+
 @app.get("/")
 def home():
     return {"message": "Running"}
 
 
-# 🔥 CLEAN JSON FIX FUNCTION (OUTSIDE)
+# 🔥 FIXED JSON CLEANER
 def clean_llm_json(output: str):
     output = output.strip()
 
-    # remove ```json or ```
     if output.startswith("```"):
         parts = output.split("```")
         if len(parts) >= 2:
             output = parts[1]
 
-    # remove 'json' prefix
     if output.startswith("json"):
         output = output[4:]
 
-    # remove ending ```
     if output.endswith("```"):
         output = output[:-3]
+
+    # 🔥 IMPORTANT FIX
+    if "}" in output:
+        output = output[:output.rfind("}") + 1]
 
     return output.strip()
 
 
-@app.post("/analyze")
-def analyze(data: RepoRequest):
-    # 🔹 STEP 1 — clone repo
+# =====================
+# LOAD
+# =====================
+@app.post("/load")
+def load_repo_api(data: RepoRequest):
     path = clone_repo(data.repo_url)
+    repo_name = path.split("/")[-1]
 
-    # 🔹 STEP 2 — get files
+    save_state({
+        "name": repo_name,
+        "path": path
+    })
+
+    return {"message": f"Repo '{repo_name}' loaded successfully"}
+
+
+# =====================
+# ANALYZE
+# =====================
+@app.post("/analyze")
+def analyze():
+    state = load_state()
+
+    if not state.get("path"):
+        return {"error": "No repo loaded. Call /load first."}
+
+    path = state["path"]
+
     files = get_file_tree(path)
 
-    # 🔹 STEP 3 — get file descriptions (batch LLM)
     batch_result = summarize_all_files(path, files)
 
     try:
         cleaned = clean_llm_json(batch_result)
         descriptions = json.loads(cleaned)
+
+        # 🔥 FIX BACKSLASH ISSUE
+        descriptions = {
+            k.replace("\\", "/"): v
+            for k, v in descriptions.items()
+        }
+
     except Exception as e:
         print("JSON parse error:", e)
         descriptions = {}
 
-    # 🔹 STEP 4 — build tree
+    # 🔥 BUILD TREE DICT
     tree = build_tree_structure(files)
 
-    # 🔹 STEP 5 — merge tree + descriptions
-    tree_lines = format_tree_with_desc(tree, descriptions)
-    pretty_tree = "\n".join(tree_lines)
-
-    # 🔹 STEP 6 — project summary
     project_summary = generate_project_summary(path, files)
 
+    state.update({
+        "files": files,
+        "descriptions": descriptions
+    })
+    save_state(state)
+
     return {
-        "repo_name": path.split("/")[-1],
-        "pretty_tree": pretty_tree,
-        "descriptions": descriptions,
+        "repo_name": state["name"],
+        "tree_dict": tree,  # 🔥 IMPORTANT
         "project_summary": project_summary,
         "total_files": len(files)
     }
 
-class ChatRequest(BaseModel):
-    repo_url: str
-    question: str
 
+# =====================
+# CHAT
+# =====================
 @app.post("/chat")
-def chat(data: ChatRequest):
-    path = clone_repo(data.repo_url)
-    files = get_file_tree(path)
+def chat_api(data: ChatRequest):
+    state = load_state()
 
-    # reuse descriptions (IMPORTANT)
-    batch_result = summarize_all_files(path, files)
+    if not state.get("path"):
+        return {"error": "No repo loaded. Call /load first."}
 
-    try:
-        cleaned = clean_llm_json(batch_result)
-        descriptions = json.loads(cleaned)
-    except:
-        descriptions = {}
+    if not state.get("descriptions"):
+        return {"error": "Repo not analyzed. Call /analyze first."}
 
-    result = chat_with_repo(data.question, descriptions, path)
+    result = chat_with_repo(
+        data.question,
+        state["descriptions"],
+        state["path"]
+    )
 
     return result
